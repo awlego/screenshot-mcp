@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "screenshot": {
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "/Users/awlego/Repositories/screenshot-mcp"
+    }
+  }
+}
