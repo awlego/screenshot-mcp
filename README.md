@@ -2,21 +2,28 @@
 
 An MCP server that allows Claude Code to take screenshots of your screen.
 
-## Setup
+## Installation
 
-1. Install dependencies:
+1. Clone the repository:
+```bash
+git clone https://github.com/awlego/screenshot-mcp.git
+cd screenshot-mcp
+```
+
+2. Install dependencies:
 ```bash
 npm install
 ```
 
-2. Build the project:
+3. Build the project:
 ```bash
 npm run build
 ```
 
-3. Install the MCP server in Claude Code:
+4. Install the MCP server in Claude Code:
 ```bash
-claude mcp add screenshot "node" "/Users/awlego/Repositories/screenshot-mcp/dist/index.js"
+# Using the claude command (replace with your actual path)
+claude mcp add screenshot "node" "$(pwd)/dist/index.js"
 ```
 
 Or manually add to your Claude Code configuration (~/.config/claude/claude_desktop_config.json):
@@ -25,11 +32,13 @@ Or manually add to your Claude Code configuration (~/.config/claude/claude_deskt
   "mcpServers": {
     "screenshot": {
       "command": "node",
-      "args": ["/Users/awlego/Repositories/screenshot-mcp/dist/index.js"]
+      "args": ["<path-to-screenshot-mcp>/dist/index.js"]
     }
   }
 }
 ```
+
+Replace `<path-to-screenshot-mcp>` with the full path to where you cloned the repository.
 
 ## Usage
 
