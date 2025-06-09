@@ -42,15 +42,37 @@ Replace `<path-to-screenshot-mcp>` with the full path to where you cloned the re
 
 ## Usage
 
-Once configured, Claude Code can use the `take_screenshot` tool to:
-- Capture screenshots of your screen
-- Save them to a `screenshots` folder in the current working directory
-- Display the screenshot directly in the conversation
+Once configured, Claude Code has access to two tools:
 
-### Tool Parameters
+### `take_screenshot`
+Capture screenshots of your screen, specific windows, or interactively select areas.
 
-- `filename` (optional): Custom filename for the screenshot (without extension)
-- `display` (optional): Display number to capture (default: 1)
+**Parameters:**
+- `filename` (optional): Custom filename for the screenshot (without extension). If not provided, uses timestamp format (YYYY-MM-DD_HH-MM-SS)
+- `mode` (optional): Screenshot mode
+  - `"fullscreen"` (default): Capture entire screen
+  - `"window"`: Capture specific window by ID
+  - `"interactive"`: User selects area/window interactively
+- `windowId` (required for window mode): Window ID to capture. Use `list_windows` to get available IDs
+- `display` (optional): Display number to capture (default: 1, fullscreen mode only)
+- `includeWindowShadow` (optional): Include window shadow (default: true, window mode only)
+
+### `list_windows`
+List all available windows with their IDs, app names, and titles for targeted screenshot capture.
+
+**Examples:**
+- Take a fullscreen screenshot: `take_screenshot`
+- Capture a specific window: First use `list_windows`, then `take_screenshot` with `mode: "window"` and the desired `windowId`
+- Interactive selection: `take_screenshot` with `mode: "interactive"`
+
+## Features
+
+- 📸 Multiple capture modes: fullscreen, window-specific, and interactive
+- 🏷️ Automatic timestamp-based filenames
+- 📁 Auto-creation of screenshots folder
+- 🖼️ Direct image display in Claude Code conversations
+- 🪟 Window listing with app names and titles
+- 🎯 Precise window targeting by ID
 
 ## Development
 
