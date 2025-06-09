@@ -28,6 +28,60 @@ interface ApplicationWindows {
   }>;
 }
 
+interface CachedWindow {
+  windowId: number;
+  appName: string;
+  windowTitle: string;
+  timestamp: number;
+}
+
+class WindowCache {
+  private cache = new Map<string, CachedWindow>();
+  private readonly CACHE_TTL = 30000; // 30 seconds
+
+  private getCacheKey(appName: string, windowTitle: string): string {
+    return `${appName}|||${windowTitle}`;
+  }
+
+  get(appName: string, windowTitle: string): number | null {
+    const key = this.getCacheKey(appName, windowTitle);
+    const cached = this.cache.get(key);
+    
+    if (!cached) return null;
+    
+    // Check if cache entry is expired
+    if (Date.now() - cached.timestamp > this.CACHE_TTL) {
+      this.cache.delete(key);
+      return null;
+    }
+    
+    return cached.windowId;
+  }
+
+  set(appName: string, windowTitle: string, windowId: number): void {
+    const key = this.getCacheKey(appName, windowTitle);
+    this.cache.set(key, {
+      windowId,
+      appName,
+      windowTitle,
+      timestamp: Date.now()
+    });
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  getStats(): { size: number; entries: CachedWindow[] } {
+    return {
+      size: this.cache.size,
+      entries: Array.from(this.cache.values())
+    };
+  }
+}
+
+const windowCache = new WindowCache();
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -74,21 +128,62 @@ const LIST_WINDOWS_TOOL: Tool = {
   description: "List all available applications and their windows to help identify targets for screenshots",
   inputSchema: {
     type: "object",
+    properties: {
+      forceRefresh: {
+        type: "boolean",
+        description: "Force refresh all window IDs, bypassing cache (default: false)",
+      },
+    },
+  },
+};
+
+const CLEAR_CACHE_TOOL: Tool = {
+  name: "clear_cache",
+  description: "Clear the window ID cache and show cache statistics",
+  inputSchema: {
+    type: "object",
     properties: {},
   },
 };
 
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
-    tools: [SCREENSHOT_TOOL, LIST_WINDOWS_TOOL],
+    tools: [SCREENSHOT_TOOL, LIST_WINDOWS_TOOL, CLEAR_CACHE_TOOL],
   };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   switch (request.params.name) {
+    case "clear_cache":
+      try {
+        const stats = windowCache.getStats();
+        windowCache.clear();
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Cache cleared. Previously contained ${stats.size} entries.`,
+            },
+          ],
+        };
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error clearing cache: ${error instanceof Error ? error.message : String(error)}`,
+            },
+          ],
+        };
+      }
+
     case "list_windows":
       try {
-        const applications = await getApplicationWindowsList();
+        const args = request.params.arguments as any;
+        const forceRefresh = args?.forceRefresh || false;
+        
+        const applications = await getApplicationWindowsList(forceRefresh);
         if (applications.length === 0) {
           return {
             content: [
@@ -100,6 +195,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           };
         }
         
+        const cacheStats = windowCache.getStats();
         const windowList = applications
           .map(app => {
             const windowEntries = app.windows
@@ -109,11 +205,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           })
           .join("\n\n");
         
+        const cacheInfo = forceRefresh ? 
+          "\n\n[Cache bypassed - all window IDs refreshed]" : 
+          `\n\n[Cache: ${cacheStats.size} entries]`;
+        
         return {
           content: [
             {
               type: "text",
-              text: `Available applications and windows:\n\n${windowList}`,
+              text: `Available applications and windows:\n\n${windowList}${cacheInfo}`,
             },
           ],
         };
@@ -150,28 +250,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let command: string;
         
         if (appName) {
-          // App-specific screenshot using GetWindowID
+          // App-specific screenshot using cached window IDs when possible
           let windowId: number;
           
           if (windowName) {
-            // Use specific window name
-            try {
-              const { stdout: windowIdStr } = await execAsync(`GetWindowID "${appName}" "${windowName}"`);
-              windowId = parseInt(windowIdStr.trim());
-              if (isNaN(windowId)) {
-                throw new Error(`Invalid window ID returned for ${appName} - ${windowName}`);
+            // Try cache first for specific window name
+            windowId = windowCache.get(appName, windowName) || 0;
+            
+            if (!windowId) {
+              // Cache miss - use GetWindowID
+              try {
+                const { stdout: windowIdStr } = await execAsync(`GetWindowID "${appName}" "${windowName}"`);
+                windowId = parseInt(windowIdStr.trim());
+                if (isNaN(windowId)) {
+                  throw new Error(`Invalid window ID returned for ${appName} - ${windowName}`);
+                }
+                // Cache the result
+                windowCache.set(appName, windowName, windowId);
+              } catch (error) {
+                throw new Error(`Could not find window "${windowName}" in application "${appName}". Use list_windows to see available windows.`);
               }
-            } catch (error) {
-              throw new Error(`Could not find window "${windowName}" in application "${appName}". Use list_windows to see available windows.`);
             }
           } else {
-            // Find first available window for the app
-            const applications = await getApplicationWindowsList();
-            const targetApp = applications.find(app => app.appName.toLowerCase() === appName.toLowerCase());
-            if (!targetApp || targetApp.windows.length === 0) {
+            // Find first available window for the app using fast cached lookup
+            windowId = await getFirstWindowIdForApp(appName);
+            if (!windowId) {
               throw new Error(`No windows found for application "${appName}". Use list_windows to see available applications.`);
             }
-            windowId = targetApp.windows[0].windowId;
           }
           
           const shadowFlag = includeWindowShadow ? "" : "-o";
@@ -231,8 +336,70 @@ async function readFileAsBase64(filePath: string): Promise<string> {
   return buffer.toString("base64");
 }
 
-async function getApplicationWindowsList(): Promise<ApplicationWindows[]> {
-  const windows = await getWindowList();
+async function getFirstWindowIdForApp(appName: string): Promise<number> {
+  try {
+    // First check cache for any windows of this app
+    const cacheStats = windowCache.getStats();
+    const cachedWindow = cacheStats.entries.find(entry => 
+      entry.appName.toLowerCase() === appName.toLowerCase()
+    );
+    
+    if (cachedWindow) {
+      return cachedWindow.windowId;
+    }
+    
+    // Cache miss - use direct AppleScript approach to avoid recursion
+    const appleScript = `
+      tell application "System Events"
+        try
+          set appProcess to first application process whose name is "${appName}"
+          set firstWindow to first window of appProcess
+          return name of firstWindow
+        on error
+          return "NOT_FOUND"
+        end try
+      end tell
+    `;
+    
+    const fs = await import("fs/promises");
+    const os = await import("os");
+    const path = await import("path");
+    
+    const tmpFile = path.join(os.tmpdir(), 'getFirstWindow.scpt');
+    await fs.writeFile(tmpFile, appleScript);
+    
+    const { stdout } = await execAsync(`osascript ${tmpFile}`);
+    await fs.unlink(tmpFile);
+    
+    const windowTitle = stdout.trim();
+    
+    if (windowTitle === "NOT_FOUND" || !windowTitle) {
+      return 0;
+    }
+    
+    // Get window ID for this specific window
+    try {
+      const { stdout: windowIdStr } = await execAsync(`GetWindowID "${appName}" "${windowTitle}"`);
+      const windowId = parseInt(windowIdStr.trim());
+      
+      if (!isNaN(windowId)) {
+        // Cache the result
+        windowCache.set(appName, windowTitle, windowId);
+        return windowId;
+      }
+    } catch (error) {
+      console.error(`Failed to get window ID for ${appName} - ${windowTitle}:`, error);
+    }
+    
+    return 0;
+  } catch (error) {
+    console.error(`Error getting first window ID for ${appName}:`, error);
+    return 0;
+  }
+}
+
+async function getApplicationWindowsList(forceRefresh = false): Promise<ApplicationWindows[]> {
+  const windows = await getWindowList(forceRefresh);
   
   // Group windows by application
   const appMap = new Map<string, ApplicationWindows>();
@@ -257,7 +424,7 @@ async function getApplicationWindowsList(): Promise<ApplicationWindows[]> {
   );
 }
 
-async function getWindowList(): Promise<WindowInfo[]> {
+async function getWindowList(forceRefresh = false): Promise<WindowInfo[]> {
   try {
     // Get list of all windows from all applications
     const appleScript = `
@@ -297,28 +464,45 @@ async function getWindowList(): Promise<WindowInfo[]> {
     const windowStrings = stdout.trim().split(", ");
     const windows: WindowInfo[] = [];
     
-    // Get window IDs for each window using GetWindowID
+    // Get window IDs for each window, using cache when possible
     for (const windowString of windowStrings) {
       const parts = windowString.split("|||");
       if (parts.length === 2) {
         const appName = parts[0];
         const windowTitle = parts[1];
         
-        try {
-          // Use GetWindowID to get the actual window ID
-          const { stdout: windowIdStr } = await execAsync(`GetWindowID "${appName}" "${windowTitle}"`);
-          const windowId = parseInt(windowIdStr.trim());
-          
-          if (!isNaN(windowId)) {
-            windows.push({
-              windowId,
-              appName,
-              windowTitle
-            });
+        let windowId: number;
+        
+        // Try cache first (unless force refresh is requested)
+        if (!forceRefresh) {
+          windowId = windowCache.get(appName, windowTitle) || 0;
+        } else {
+          windowId = 0;
+        }
+        
+        if (!windowId) {
+          // Cache miss or force refresh - use GetWindowID
+          try {
+            const { stdout: windowIdStr } = await execAsync(`GetWindowID "${appName}" "${windowTitle}"`);
+            windowId = parseInt(windowIdStr.trim());
+            
+            if (!isNaN(windowId)) {
+              // Cache the result
+              windowCache.set(appName, windowTitle, windowId);
+            }
+          } catch (error) {
+            // If GetWindowID fails for this window, skip it
+            console.error(`Failed to get window ID for ${appName} - ${windowTitle}:`, error);
+            continue;
           }
-        } catch (error) {
-          // If GetWindowID fails for this window, skip it
-          console.error(`Failed to get window ID for ${appName} - ${windowTitle}:`, error);
+        }
+        
+        if (!isNaN(windowId) && windowId > 0) {
+          windows.push({
+            windowId,
+            appName,
+            windowTitle
+          });
         }
       }
     }
